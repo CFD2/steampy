@@ -20,6 +20,7 @@ from steampy.utils import (
     account_id_to_steam_id,
     get_description_key,
     get_key_value_from_url,
+    get_wallet_details_from_html,
     login_required,
     merge_items_with_descriptions_from_inventory,
     merge_items_with_descriptions_from_offer,
@@ -764,15 +765,18 @@ class SteamClient:
     @login_required
     def get_wallet_balance(self, convert_to_decimal: bool = True, on_hold: bool = False) -> Union[str, Decimal]:
         response = self._request('GET', f'{SteamUrl.COMMUNITY_URL}/market')
-        wallet_info_match = re.search(r'var g_rgWalletInfo = (.*?);', response.text)
-        if not wallet_info_match:
-            raise ApiException('Unable to parse wallet info from market page')
+        if response.status_code != 200:
+            raise ApiException(f'Failed to load market page. Status: {response.status_code}')
 
-        balance_dict = json.loads(wallet_info_match.group(1))
-        balance_dict_key = 'wallet_delayed_balance' if on_hold else 'wallet_balance'
-        if balance_dict_key not in balance_dict:
-            raise ApiException(f'Wallet key "{balance_dict_key}" is missing in Steam response')
+        wallet_details = get_wallet_details_from_html(response.text)
+        balance_key = 'delayed_balance' if on_hold else 'balance'
+        if balance_key not in wallet_details:
+            raise ApiException(f'Wallet key "{balance_key}" is missing in Steam response')
+
+        balance = wallet_details[balance_key]
+        if not isinstance(balance, str) or not re.fullmatch(r'-?[0-9]+', balance):
+            raise ApiException(f'Wallet key "{balance_key}" is not a valid cent amount in Steam response')
 
         if convert_to_decimal:
-            return Decimal(balance_dict[balance_dict_key]) / 100
-        return balance_dict[balance_dict_key]
+            return Decimal(balance) / 100
+        return balance

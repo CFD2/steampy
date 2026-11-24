@@ -1,4 +1,5 @@
 import json
+from decimal import Decimal
 from unittest import TestCase
 from unittest.mock import MagicMock, patch
 
@@ -24,6 +25,23 @@ class DummyResponse:
         if isinstance(self._json_data, Exception):
             raise self._json_data
         return self._json_data
+
+
+def wallet_query(balance='5678', delayed_balance='0'):
+    return {
+        'queryKey': ['CurrentUserWalletDetails', '76561198000000000'],
+        'state': {'data': {'balance': balance, 'delayed_balance': delayed_balance}},
+    }
+
+
+def build_market_page(queries=None, script_body=None, script_attributes=None):
+    if script_body is None:
+        if queries is None:
+            queries = [wallet_query()]
+        script_body = json.dumps({'renderContext': {'queryData': json.dumps({'queries': queries})}})
+    attributes = script_attributes or {'type': 'application/json', 'id': 'valve-ssr-data', 'nonce': 'nonce-value'}
+    attrs = ' '.join(f'{name}="{value}"' for name, value in attributes.items())
+    return f'<html><body><script {attrs}>{script_body}</script></body></html>'
 
 
 class TestSteamClientUnit(TestCase):
@@ -418,3 +436,132 @@ class TestSteamClientUnit(TestCase):
         )
 
         self.assertFalse(client.is_session_alive())
+
+    def _client_with_market_page(self, html, status_code=200):
+        client = SteamClient('api-key')
+        client.was_login_executed = True
+        client._request = MagicMock(return_value=DummyResponse(status_code=status_code, text=html))
+        return client
+
+    def test_get_wallet_balance_returns_decimal(self):
+        client = self._client_with_market_page(build_market_page())
+
+        self.assertEqual(client.get_wallet_balance(), Decimal('56.78'))
+
+    def test_get_wallet_balance_returns_text(self):
+        client = self._client_with_market_page(build_market_page())
+
+        self.assertEqual(client.get_wallet_balance(convert_to_decimal=False), '5678')
+
+    def test_get_wallet_balance_returns_negative_decimal(self):
+        page = build_market_page(queries=[wallet_query(balance='-5678')])
+        client = self._client_with_market_page(page)
+
+        self.assertEqual(client.get_wallet_balance(), Decimal('-56.78'))
+
+    def test_get_wallet_balance_raises_for_invalid_balance_value(self):
+        for balance in (None, 5678, '', 'abc', '5678.5', 'NaN'):
+            for convert_to_decimal in (True, False):
+                with self.subTest(balance=balance, convert_to_decimal=convert_to_decimal):
+                    page = build_market_page(queries=[wallet_query(balance=balance)])
+                    client = self._client_with_market_page(page)
+
+                    with self.assertRaises(ApiException):
+                        client.get_wallet_balance(convert_to_decimal=convert_to_decimal)
+
+    def test_get_wallet_balance_on_hold_returns_decimal(self):
+        page = build_market_page(queries=[wallet_query(delayed_balance='250')])
+        client = self._client_with_market_page(page)
+
+        self.assertEqual(client.get_wallet_balance(on_hold=True), Decimal('2.50'))
+
+    def test_get_wallet_balance_on_hold_returns_text(self):
+        page = build_market_page(queries=[wallet_query(delayed_balance='250')])
+        client = self._client_with_market_page(page)
+
+        self.assertEqual(client.get_wallet_balance(convert_to_decimal=False, on_hold=True), '250')
+
+    def test_get_wallet_balance_returns_zero_balance(self):
+        page = build_market_page(queries=[wallet_query(balance='0')])
+        client = self._client_with_market_page(page)
+
+        self.assertEqual(client.get_wallet_balance(), Decimal('0'))
+
+    def test_get_wallet_balance_skips_unrelated_queries(self):
+        queries = [
+            {'queryKey': []},
+            {'queryKey': ['OtherWalletQuery', '1'], 'state': {'data': {'balance': '999'}}},
+            {'queryKey': ['QueryWithoutState']},
+            wallet_query(balance='1234'),
+            {'state': {'data': {'balance': '888'}}},
+            {'queryKey': ['TrailingQuery'], 'state': {}},
+        ]
+        client = self._client_with_market_page(build_market_page(queries=queries))
+
+        self.assertEqual(client.get_wallet_balance(), Decimal('12.34'))
+
+    def test_get_wallet_balance_parses_script_attributes_in_any_order(self):
+        attributes = {'nonce': 'another-nonce', 'id': 'valve-ssr-data', 'type': 'application/json'}
+        client = self._client_with_market_page(build_market_page(script_attributes=attributes))
+
+        self.assertEqual(client.get_wallet_balance(), Decimal('56.78'))
+
+    def test_get_wallet_balance_raises_without_script_element(self):
+        client = self._client_with_market_page('<html><body>logged out</body></html>')
+
+        with self.assertRaises(ApiException):
+            client.get_wallet_balance()
+
+    def test_get_wallet_balance_raises_without_query_data(self):
+        page = build_market_page(script_body=json.dumps({'renderContext': {}}))
+        client = self._client_with_market_page(page)
+
+        with self.assertRaises(ApiException):
+            client.get_wallet_balance()
+
+    def test_get_wallet_balance_raises_without_wallet_entry(self):
+        queries = [{'queryKey': ['OtherWalletQuery', '1'], 'state': {'data': {'balance': '5678'}}}]
+        client = self._client_with_market_page(build_market_page(queries=queries))
+
+        with self.assertRaises(ApiException):
+            client.get_wallet_balance()
+
+    def test_get_wallet_balance_raises_when_state_data_is_null(self):
+        queries = [{'queryKey': ['CurrentUserWalletDetails', '1'], 'state': {'data': None}}]
+        client = self._client_with_market_page(build_market_page(queries=queries))
+
+        with self.assertRaises(ApiException):
+            client.get_wallet_balance()
+
+    def test_get_wallet_balance_raises_for_invalid_script_json(self):
+        client = self._client_with_market_page(build_market_page(script_body='not json'))
+
+        with self.assertRaises(ApiException):
+            client.get_wallet_balance()
+
+    def test_get_wallet_balance_raises_for_invalid_query_data_json(self):
+        page = build_market_page(script_body=json.dumps({'renderContext': {'queryData': 'not json'}}))
+        client = self._client_with_market_page(page)
+
+        with self.assertRaises(ApiException):
+            client.get_wallet_balance()
+
+    def test_get_wallet_balance_raises_when_delayed_balance_missing_on_hold(self):
+        queries = [{'queryKey': ['CurrentUserWalletDetails', '1'], 'state': {'data': {'balance': '5678'}}}]
+        client = self._client_with_market_page(build_market_page(queries=queries))
+
+        with self.assertRaises(ApiException):
+            client.get_wallet_balance(on_hold=True)
+
+    def test_get_wallet_balance_raises_on_non_200_status(self):
+        client = self._client_with_market_page(build_market_page(), status_code=500)
+
+        with self.assertRaises(ApiException):
+            client.get_wallet_balance()
+
+    def test_get_wallet_balance_makes_single_request_to_market_page(self):
+        client = self._client_with_market_page(build_market_page())
+
+        client.get_wallet_balance()
+
+        client._request.assert_called_once_with('GET', 'https://steamcommunity.com/market')

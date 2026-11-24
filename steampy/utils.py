@@ -1,6 +1,7 @@
 import os
 import re
 import copy
+import json
 import math
 import struct
 import time
@@ -16,7 +17,7 @@ from requests.structures import CaseInsensitiveDict
 
 from steampy.models import GameOptions
 from steampy.models import DEFAULT_USER_AGENT
-from steampy.exceptions import ProxyConnectionError, LoginRequired
+from steampy.exceptions import ApiException, ProxyConnectionError, LoginRequired
 
 
 def login_required(func):
@@ -163,6 +164,45 @@ def merge_items(items: List[dict], descriptions: dict, **kwargs) -> dict:
         merged_items[item_id] = description
 
     return merged_items
+
+
+def get_wallet_details_from_html(html: str) -> dict:
+    document = BeautifulSoup(html, 'html.parser')
+    script = document.find('script', id='valve-ssr-data')
+    if script is None:
+        raise ApiException('Unable to find valve-ssr-data script on market page')
+
+    try:
+        ssr_data = json.loads(script.string or '')
+    except json.JSONDecodeError as exc:
+        raise ApiException('Unable to parse valve-ssr-data JSON from market page') from exc
+
+    render_context = ssr_data.get('renderContext') if isinstance(ssr_data, dict) else None
+    query_data_raw = render_context.get('queryData') if isinstance(render_context, dict) else None
+    if not isinstance(query_data_raw, str):
+        raise ApiException('Unable to find renderContext.queryData on market page')
+
+    try:
+        query_data = json.loads(query_data_raw)
+    except json.JSONDecodeError as exc:
+        raise ApiException('Unable to parse renderContext.queryData JSON from market page') from exc
+
+    queries = query_data.get('queries') if isinstance(query_data, dict) else None
+    if not isinstance(queries, list):
+        raise ApiException('Unable to find queries in market page data')
+
+    for query in queries:
+        if not isinstance(query, dict):
+            continue
+        query_key = query.get('queryKey')
+        if isinstance(query_key, list) and query_key and query_key[0] == 'CurrentUserWalletDetails':
+            state = query.get('state')
+            data = state.get('data') if isinstance(state, dict) else None
+            if not isinstance(data, dict):
+                raise ApiException('Wallet details data is missing on market page')
+            return data
+
+    raise ApiException('Unable to find wallet details in market page data')
 
 
 def get_market_listings_from_html(html: str) -> dict:
