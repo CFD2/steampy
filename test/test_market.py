@@ -47,10 +47,14 @@ class TestMarket(TestCase):
         client = SteamClient(self.credentials.api_key)
         client.login(self.credentials.login, self.credentials.password, self.shared_secret, self.steam_id, self.identity_secret)
         listings = client.market.get_my_market_listings()
-        self.assertEqual(len(listings), 2)
-        self.assertEqual(len(listings.get('buy_orders')), 1)
-        self.assertEqual(len(listings.get('sell_listings')), 1)
-        self.assertIsInstance(next(iter(listings.get('sell_listings').values())).get('description'), dict)
+        self.assertEqual(len(listings), 3)
+        self.assertIsInstance(listings.get('buy_orders'), list)
+        self.assertIsInstance(listings.get('listings'), list)
+        self.assertIsInstance(listings.get('listings_to_confirm'), list)
+        for listing in listings.get('listings'):
+            self.assertIn('listingid', listing)
+            self.assertIsInstance(listing.get('asset'), dict)
+            self.assertIn('id', listing.get('asset'))
 
     def test_create_and_remove_sell_listing(self):
         client = SteamClient(self.credentials.api_key)
@@ -65,11 +69,11 @@ class TestMarket(TestCase):
         self.assertIsNotNone(asset_id_to_sell, 'You need at least 1 marketable item to pass this test')
         response = client.market.create_sell_order(asset_id_to_sell, game, '10000')
         self.assertTrue(response['success'])
-        sell_listings = client.market.get_my_market_listings()['sell_listings']
+        listings = client.market.get_my_market_listings()
         listing_to_cancel = None
-        for listing in sell_listings.values():
-            if listing['description']['id'] == asset_id_to_sell:
-                listing_to_cancel = listing['listing_id']
+        for listing in listings['listings'] + listings['listings_to_confirm']:
+            if listing['asset']['id'] == asset_id_to_sell:
+                listing_to_cancel = listing['listingid']
                 break
         self.assertIsNotNone(listing_to_cancel)
         client.market.cancel_sell_order(listing_to_cancel)
