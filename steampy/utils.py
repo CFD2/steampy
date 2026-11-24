@@ -1,6 +1,6 @@
 import os
-import re
 import copy
+import json
 import math
 import struct
 import time
@@ -10,13 +10,13 @@ from decimal import Decimal
 from urllib.parse import urlparse, parse_qs
 
 import requests
-from bs4 import BeautifulSoup, Tag
+from bs4 import BeautifulSoup
 from requests.exceptions import RequestException
 from requests.structures import CaseInsensitiveDict
 
 from steampy.models import GameOptions
 from steampy.models import DEFAULT_USER_AGENT
-from steampy.exceptions import ProxyConnectionError, LoginRequired
+from steampy.exceptions import ApiException, ProxyConnectionError, LoginRequired
 
 
 def login_required(func):
@@ -142,14 +142,6 @@ def merge_items_with_descriptions_from_offer(offer: dict, descriptions: dict) ->
     return offer
 
 
-def merge_items_with_descriptions_from_listing(listings: dict, ids_to_assets_address: dict, descriptions: dict) -> dict:
-    for listing_id, listing in listings.get('sell_listings').items():
-        asset_address = ids_to_assets_address[listing_id]
-        description = descriptions[asset_address[0]][asset_address[1]][asset_address[2]]
-        listing['description'] = description
-    return listings
-
-
 def merge_items(items: List[dict], descriptions: dict, **kwargs) -> dict:
     merged_items = {}
 
@@ -165,81 +157,43 @@ def merge_items(items: List[dict], descriptions: dict, **kwargs) -> dict:
     return merged_items
 
 
-def get_market_listings_from_html(html: str) -> dict:
+def get_wallet_details_from_html(html: str) -> dict:
     document = BeautifulSoup(html, 'html.parser')
-    listings_root = document.select_one('div#myListings')
-    if listings_root is None:
-        return {'buy_orders': {}, 'sell_listings': {}}
+    script = document.find('script', id='valve-ssr-data')
+    if script is None:
+        raise ApiException('Unable to find valve-ssr-data script on market page')
 
-    nodes = listings_root.findAll('div', {'class': 'market_home_listing_table'})
-    sell_listings_dict = {}
-    buy_orders_dict = {}
+    try:
+        ssr_data = json.loads(script.string or '')
+    except json.JSONDecodeError as exc:
+        raise ApiException('Unable to parse valve-ssr-data JSON from market page') from exc
 
-    for node in nodes:
-        if 'My sell listings' in node.text:
-            sell_listings_active = get_sell_listings_from_node(node)
-            sell_listings_dict.update(sell_listings_active)
-        elif 'My listings awaiting confirmation' in node.text:
-            sell_listings_awaiting_conf = get_sell_listings_from_node(node)
-            for listing in sell_listings_awaiting_conf.values():
-                listing['need_confirmation'] = True
-            sell_listings_dict.update(sell_listings_awaiting_conf)
-        elif 'My buy orders' in node.text:
-            buy_orders_dict = get_buy_orders_from_node(node)
+    render_context = ssr_data.get('renderContext') if isinstance(ssr_data, dict) else None
+    query_data_raw = render_context.get('queryData') if isinstance(render_context, dict) else None
+    if not isinstance(query_data_raw, str):
+        raise ApiException('Unable to find renderContext.queryData on market page')
 
-    return {'buy_orders': buy_orders_dict, 'sell_listings': sell_listings_dict}
+    try:
+        query_data = json.loads(query_data_raw)
+    except json.JSONDecodeError as exc:
+        raise ApiException('Unable to parse renderContext.queryData JSON from market page') from exc
 
+    queries = query_data.get('queries') if isinstance(query_data, dict) else None
+    if not isinstance(queries, list):
+        raise ApiException('Unable to find queries in market page data')
 
-def get_sell_listings_from_node(node: Tag) -> dict:
-    sell_listings_raw = node.findAll('div', {'id': re.compile('mylisting_\d+')})
-    sell_listings_dict = {}
+    for query in queries:
+        if not isinstance(query, dict):
+            continue
+        query_key = query.get('queryKey')
+        if isinstance(query_key, list) and query_key and query_key[0] == 'CurrentUserWalletDetails':
+            state = query.get('state')
+            data = state.get('data') if isinstance(state, dict) else None
+            if not isinstance(data, dict):
+                raise ApiException('Wallet details data is missing on market page')
+            return data
 
-    for listing_raw in sell_listings_raw:
-        spans = listing_raw.select('span[title]')
-        listing = {
-            'listing_id': listing_raw.attrs['id'].replace('mylisting_', ''),
-            'buyer_pay': spans[0].text.strip(),
-            'you_receive': spans[1].text.strip()[1:-1],
-            'created_on': listing_raw.findAll('div', {'class': 'market_listing_listed_date'})[0].text.strip(),
-            'need_confirmation': False,
-        }
-        sell_listings_dict[listing['listing_id']] = listing
-
-    return sell_listings_dict
-
-
-def get_market_sell_listings_from_api(html: str) -> dict:
-    document = BeautifulSoup(html, 'html.parser')
-    sell_listings_dict = get_sell_listings_from_node(document)
-    return {'sell_listings': sell_listings_dict}
-
-
-def get_buy_orders_from_node(node: Tag) -> dict:
-    buy_orders_raw = node.findAll('div', {'id': re.compile('mybuyorder_\\d+')})
-    buy_orders_dict = {}
-
-    for order in buy_orders_raw:
-        qnt_price_raw = order.select('span[class=market_listing_price]')[0].text.split('@')
-        order = {
-            'order_id': order.attrs['id'].replace('mybuyorder_', ''),
-            'quantity': int(qnt_price_raw[0].strip()),
-            'price': qnt_price_raw[1].strip(),
-            'item_name': order.a.text,
-            'game_name': order.select('span[class=market_listing_game_name]')[0].text,
-        }
-        buy_orders_dict[order['order_id']] = order
-
-    return buy_orders_dict
-
-
-def get_listing_id_to_assets_address_from_html(html: str) -> dict:
-    listing_id_to_assets_address = {}
-    regex = "CreateItemHoverFromContainer\( [\w]+, 'mylisting_([\d]+)_[\w]+', ([\d]+), '([\d]+)', '([\d]+)', [\d]+ \);"
-
-    for match in re.findall(regex, html):
-        listing_id_to_assets_address[match[0]] = [str(match[1]), match[2], match[3]]
-
-    return listing_id_to_assets_address
+    raise ApiException('Unable to find wallet details in market page data')
 
 
 def get_description_key(item: dict) -> str:

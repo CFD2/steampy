@@ -12,14 +12,7 @@ from requests.exceptions import RequestException
 from steampy.confirmation import ConfirmationExecutor
 from steampy.exceptions import ApiException, TooManyRequests
 from steampy.models import DEFAULT_USER_AGENT, Currency, GameOptions, SteamUrl
-from steampy.utils import (
-    get_listing_id_to_assets_address_from_html,
-    get_market_listings_from_html,
-    get_market_sell_listings_from_api,
-    login_required,
-    merge_items_with_descriptions_from_listing,
-    text_between,
-)
+from steampy.utils import login_required
 
 logger = logging.getLogger(__name__)
 
@@ -104,58 +97,55 @@ class SteamMarket:
 
     @login_required
     def get_my_market_listings(self, language: str = 'english') -> dict:
-        response = self._request('GET', f'{SteamUrl.COMMUNITY_URL}/market?l={language}')
-        if response.status_code != HTTPStatus.OK:
-            raise ApiException(f'There was a problem getting the listings. HTTP code: {response.status_code}')
+        url = f'{SteamUrl.COMMUNITY_URL}/market/mylistings'
+        buy_orders = []
+        listings = []
+        listings_to_confirm = []
+        total_count = 0
+        first_reply = True
 
-        assets_descriptions = json.loads(text_between(response.text, 'var g_rgAssets = ', ';\n'))
-        listing_id_to_assets_address = get_listing_id_to_assets_address_from_html(response.text)
-        listings = get_market_listings_from_html(response.text)
-        listings = merge_items_with_descriptions_from_listing(
-            listings, listing_id_to_assets_address, assets_descriptions
-        )
+        while True:
+            params = {'start': len(listings), 'count': 100, 'norender': 1, 'l': language}
+            response = self._request('GET', url, params=params)
+            if response.status_code != HTTPStatus.OK:
+                raise ApiException(f'There was a problem getting the listings. HTTP code: {response.status_code}')
 
-        if '<span id="tabContentsMyActiveMarketListings_end">' in response.text:
-            n_showing = int(text_between(response.text, '<span id="tabContentsMyActiveMarketListings_end">', '</span>'))
-            n_total = int(
-                text_between(response.text, '<span id="tabContentsMyActiveMarketListings_total">', '</span>').replace(
-                    ',', ''
+            payload = self._json_or_raise(response, 'get_my_market_listings')
+            if not isinstance(payload, dict):
+                raise ApiException(f'Unexpected listings response: {type(payload).__name__}')
+            if payload.get('success') is not True:
+                raise ApiException(
+                    f'There was a problem getting the listings. success: {payload.get("success")}, '
+                    f'message: {str(payload.get("message"))[:200]}'
                 )
-            )
-
-            if n_showing < n_total < 1000:
-                url = (
-                    f'{SteamUrl.COMMUNITY_URL}/market/mylistings/render/'
-                    f'?query=&start={n_showing}&count=-1&l={language}'
-                )
-                response = self._request('GET', url)
-                if response.status_code != HTTPStatus.OK:
-                    raise ApiException(f'There was a problem getting the listings. HTTP code: {response.status_code}')
-                jresp = self._json_or_raise(response, 'get_my_market_listings.render')
-                listing_id_to_assets_address = get_listing_id_to_assets_address_from_html(jresp.get('hovers', ''))
-                listings_2 = get_market_sell_listings_from_api(jresp.get('results_html', ''))
-                listings_2 = merge_items_with_descriptions_from_listing(
-                    listings_2, listing_id_to_assets_address, jresp.get('assets', {})
-                )
-                listings['sell_listings'] = {**listings['sell_listings'], **listings_2['sell_listings']}
-            else:
-                for i in range(0, n_total, 100):
-                    url = (
-                        f'{SteamUrl.COMMUNITY_URL}/market/mylistings/'
-                        f'?query=&start={n_showing + i}&count=100&l={language}'
+            for field in ('buy_orders', 'listings', 'listings_to_confirm'):
+                if not isinstance(payload.get(field), list):
+                    raise ApiException(
+                        f'Unexpected {field} in listings response: {type(payload.get(field)).__name__}'
                     )
-                    response = self._request('GET', url)
-                    if response.status_code != HTTPStatus.OK:
-                        raise ApiException(f'There was a problem getting the listings. HTTP code: {response.status_code}')
-                    jresp = self._json_or_raise(response, 'get_my_market_listings.page')
-                    listing_id_to_assets_address = get_listing_id_to_assets_address_from_html(jresp.get('hovers', ''))
-                    listings_2 = get_market_sell_listings_from_api(jresp.get('results_html', ''))
-                    listings_2 = merge_items_with_descriptions_from_listing(
-                        listings_2, listing_id_to_assets_address, jresp.get('assets', {})
-                    )
-                    listings['sell_listings'] = {**listings['sell_listings'], **listings_2['sell_listings']}
+            if not isinstance(payload.get('total_count'), int):
+                raise ApiException(
+                    f'Unexpected total_count in listings response: '
+                    f'{type(payload.get("total_count")).__name__}'
+                )
 
-        return listings
+            if first_reply:
+                first_reply = False
+                total_count = payload['total_count']
+                listings_to_confirm = payload['listings_to_confirm']
+                buy_orders = [
+                    {key: value for key, value in order.items() if key != 'description'}
+                    for order in payload['buy_orders']
+                ]
+
+            page_listings = payload['listings']
+            listings.extend(page_listings)
+            if len(listings) >= total_count:
+                break
+            if not page_listings:
+                raise ApiException('Steam returned a page without listings before all listings were read')
+
+        return {'buy_orders': buy_orders, 'listings': listings, 'listings_to_confirm': listings_to_confirm}
 
     @login_required
     def create_sell_order(self, assetid: str, game: GameOptions, money_to_receive: str) -> dict:

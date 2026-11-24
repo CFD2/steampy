@@ -230,3 +230,28 @@ Skipped tests are existing integration tests that require real Steam secrets/env
 - Added coverage for refresh-only mode:
   - `test/test_client_unit.py`: login without credentials using refresh token.
   - `test/test_login_unit.py`: explicit failure when refresh fails and no credentials exist.
+
+## 12) Steam Market page update (November 2026)
+
+Steam replaced its Market pages on November 23, 2026. Wallet and listing data left the HTML, so the old page parsers stopped working.
+
+### `steampy/client.py`
+- `get_wallet_balance(...)` now reads the `valve-ssr-data` script. It checks the HTTP status and the balance value, and raises `ApiException` otherwise.
+
+### `steampy/market.py`
+- `get_my_market_listings(...)` now reads `/market/mylistings?norender=1`.
+- Sends one request, and one more for each further 100 active listings.
+- **Breaking:** the result has lists (`buy_orders`, `listings`, `listings_to_confirm`) instead of dicts (`buy_orders`, `sell_listings`). Entries use Steam's field names, and buy orders no longer include `description`.
+
+### `steampy/utils.py`
+- Added `get_wallet_details_from_html(...)` to read wallet details from the `valve-ssr-data` script.
+- Removed the functions that only read the old HTML:
+  - `get_market_listings_from_html(...)`,
+  - `get_sell_listings_from_node(...)`,
+  - `get_market_sell_listings_from_api(...)`,
+  - `get_buy_orders_from_node(...)`,
+  - `get_listing_id_to_assets_address_from_html(...)`,
+  - `merge_items_with_descriptions_from_listing(...)`.
+
+### Tests
+- Added unit tests for both functions in `test/test_client_unit.py` and `test/test_market_unit.py`.
