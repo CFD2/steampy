@@ -481,11 +481,12 @@ Inventory items can be merged like in `SteamClient.get_my_inventory` method
 
 `Count` parameter is default max number of items, that can be fetched.
 
-**get_wallet_balance(convert_to_decimal: bool = True, on_hold: bool = False) -> Union[str, float]**
+**get_wallet_balance(convert_to_decimal: bool = True, on_hold: bool = False) -> Union[str, Decimal]**
 
-Check account balance of steam acccount. It converts money string to Decimal if `convert_to_decimal` is set to `True`, 
-otherwise, it will return the value string without a decimal point.
-If the `on_hold` parameter is set to `True`, it will return the current on-hold balance value.
+Check the balance of the Steam account. With `convert_to_decimal=True`, it returns a `Decimal` in the wallet's currency, for example `Decimal('56.78')`.
+With `convert_to_decimal=False`, it returns the text in cents, for example `'5678'`.
+If the `on_hold` parameter is set to `True`, it returns the current on-hold balance value.
+Raises `ApiException` when the balance can't be read.
 
 Example:
 ```python
@@ -540,17 +541,29 @@ with SteamClient('MY_API_KEY', 'MY_USERNAME', 'MY_PASSWORD', shared_secret='MY_S
 
 Each entry in `response['prices']` is a list, with first entry being date, second entry price, and third entry a volume.
 
-**get_my_market_listings() -> dict**
+**get_my_market_listings(language: str = 'english') -> dict**
 
 Using `SteamClient.login` method is required before usage
 
-Returns market listings posted by user
+Returns market listings posted by the user. Passes `language` on to Steam.
+
+The result is a dict with three lists. Every entry uses Steam's own field names.
+
+- `buy_orders`: every open buy order, for all games. Each entry has `buy_orderid`, `appid`, `hash_name`, `price` (text, in cents), `quantity` (text, the original size), `quantity_remaining` (text), and `wallet_currency`.
+- `listings`: active listings. Each entry has `listingid`, `price` and `fee` (numbers, in cents: `price` is what the seller receives, and the buyer pays both), and `asset` (the item, with `appid`, `contextid`, `id`, and `market_hash_name`).
+- `listings_to_confirm`: listings that wait for a mobile confirmation, with the same fields.
+
+Listings on hold aren't returned. Sends one request, and one more for each further 100 active listings.
+
+Raises `ApiException` when Steam's reply is an error or a logged-out page, so a failed request never looks like an account without orders.
 
 ```python
 from steampy.client import SteamClient
 
 with SteamClient('MY_API_KEY', 'MY_USERNAME', 'MY_PASSWORD', shared_secret='MY_SHARED_SECRET') as client:
     listings = client.market.get_my_market_listings()
+    for order in listings['buy_orders']:
+        print(order['hash_name'], order['price'], order['quantity_remaining'])
 ```
 
 
